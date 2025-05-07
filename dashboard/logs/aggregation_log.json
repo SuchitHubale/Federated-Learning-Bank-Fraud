@@ -1,0 +1,46 @@
+[
+    {
+        "round": 1,
+        "client_models": [
+            "client1",
+            "client2"
+        ],
+        "weights": [
+            0.5,
+            0.5
+        ],
+        "timestamp": "{\"$date\": {\"$numberLong\": \"1746\"}}"
+    },
+    {
+        "round": 1,
+        "error": "Feature mismatch: Model expects 10 features, got 9"
+    },
+    {
+        "round": 1,
+        "client_models": [
+            "client1",
+            "client2"
+        ],
+        "weights": [
+            0.5,
+            0.5
+        ],
+        "timestamp": "{\"$date\": {\"$numberLong\": \"1746\"}}"
+    },
+    {
+        "round": 1,
+        "error": "Feature mismatch: Model expects 10 features, got 9"
+    },
+    {
+        "round": 1,
+        "client_models": [
+            "client1",
+            "client2"
+        ],
+        "weights": [
+            0.5,
+            0.5
+        ],
+        "timestamp": "{\"$date\": {\"$numberLong\": \"1746\"}}"
+    }
+]

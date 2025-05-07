@@ -1,118 +1,91 @@
 import os
-import sys
-import torch
-import requests
-import json
-import time
-import pickle
-from .train_local import prepare_data, train_model
-from .model import FraudDetectionModel  # Import from local file instead of server
+import numpy as np
+from sklearn.model_selection import train_test_split
+from .utils import load_data, preprocess_data, send_model_to_server, receive_global_model
+from .local_model import LocalModel
 
-class FederatedClient:
-    def __init__(self, client_id, server_url, data_path='dataset/bank1_data.csv', model_save_path='models/local_model1.pth', epochs=10):
-        self.client_id = client_id
-        self.server_url = server_url
+class Client:
+    def __init__(self, data_path="./datasets/bank1.csv"):
+        """Initialize the client with the dataset path."""
         self.data_path = data_path
-        self.model_save_path = model_save_path
-        self.epochs = epochs
+        self.model = LocalModel()
+        self.preprocessor = None
+    
+    def load_and_preprocess_data(self):
+        """Load and preprocess the client's data."""
+        # Load data
+        print("[CLIENT1] Loading data...", flush=True)
+        df = load_data(self.data_path)
         
-        # Ensure model directory exists
-        os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
+        # Preprocess data
+        print("[CLIENT1] Preprocessing data...", flush=True)
+        X_processed, y, self.preprocessor = preprocess_data(df)
         
-    def train(self):
-        """Train the local model using local data"""
-        print(f"Client {self.client_id}: Starting local training...")
-        
-        # Prepare data
-        X_train, y_train, X_test, y_test, input_dim = prepare_data(self.data_path)
-        
-        # Initialize model
-        model = FraudDetectionModel(input_dim=input_dim)
-        
-        # Check if there's a global model to start from
-        global_model_path = 'models/global_model.pth'
-        if os.path.exists(global_model_path):
-            print(f"Client {self.client_id}: Loading global model weights...")
-            model.load_state_dict(torch.load(global_model_path))
-        
-        # Train model
-        trained_model = train_model(
-            model, X_train, y_train, X_test, y_test, epochs=self.epochs, client_id=self.client_id, server_url=self.server_url
+        # Split data into train and test sets
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_processed, y, test_size=0.2, random_state=42, stratify=y
         )
         
-        # Save local model
-        torch.save(trained_model.state_dict(), self.model_save_path)
-        print(f"Client {self.client_id}: Model saved at {self.model_save_path}")
-        
-        return trained_model
+        print(f"[CLIENT1] Data loaded and preprocessed. Training set size: {X_train.shape}, Test set size: {X_test.shape}", flush=True)
+        return X_train, X_test, y_train, y_test
     
-    def send_weights(self, model):
-        """Send model weights to the server"""
-        print(f"Client {self.client_id}: Sending weights to server...")
+    def train_model(self, n_epochs=5):
+        """Train the local model on client data."""
+        # Load and preprocess data
+        X_train, X_test, y_train, y_test = self.load_and_preprocess_data()
         
-        # Get model weights
-        weights = model.get_weights()
+        # Train the model
+        print("[CLIENT1] Training local model...", flush=True)
+        metrics = self.model.train(X_train, y_train, X_test, y_test, n_epochs=n_epochs)
         
-        # Convert weights to serializable format (list of numpy arrays)
-        serialized_weights = [w.cpu().numpy().tolist() for w in weights]
-        
-        # Prepare payload
-        payload = {
-            'client_id': self.client_id,
-            'weights': serialized_weights
-        }
-        
-        try:
-            # Send weights to server
-            response = requests.post(
-                f"{self.server_url}/update",
-                json=payload
-            )
-            
-            if response.status_code == 200:
-                print(f"Client {self.client_id}: Weights sent successfully")
-                return True
-            else:
-                print(f"Client {self.client_id}: Failed to send weights, status: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"Client {self.client_id}: Error sending weights - {str(e)}")
-            return False
+        print(f"[CLIENT1] Local model training completed. Final accuracy: {metrics['final_accuracy']:.4f}", flush=True)
+        return metrics
     
-    def get_global_model(self):
-        """Retrieve global model from server"""
-        print(f"Client {self.client_id}: Requesting global model...")
-        max_retries = 10
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(f"{self.server_url}/model")
-                if response.status_code == 200:
-                    # Save global model weights
-                    global_model_path = 'models/global_model.pth'
-                    with open(global_model_path, 'wb') as f:
-                        f.write(response.content)
-                    print(f"Client {self.client_id}: Global model retrieved and saved")
-                    return True
-                else:
-                    print(f"Client {self.client_id}: Global model not ready (status: {response.status_code}), retrying...")
-                    time.sleep(3)
-            except Exception as e:
-                print(f"Client {self.client_id}: Error getting global model - {str(e)}. Retrying...")
-                time.sleep(3)
-        print(f"Client {self.client_id}: Failed to get global model after {max_retries} attempts.")
+    def send_model(self, server_url='http://localhost:5000/upload_model'):
+        """Send the trained model to the server."""
+        model_path = self.model.model_path
+        print("[CLIENT1] Sending model to server...", flush=True)
+        return send_model_to_server(model_path, server_url)
+    
+    def update_model(self, server_url='http://localhost:5000/get_global_model'):
+        """Update local model with the global model from the server."""
+        global_model_path = './models/global_model.pkl'
+        print("[CLIENT1] Receiving global model from server...", flush=True)
+        success = receive_global_model(server_url, global_model_path)
+        
+        if success:
+            # Load the global model
+            print("[CLIENT1] Loading global model...", flush=True)
+            self.model.load_model()
+            return True
         return False
     
-    def run_federated_round(self):
-        """Run one round of federated learning"""
-        # Train local model
-        model = self.train()
+    def evaluate_model(self):
+        """Evaluate the current model on test data."""
+        # Load and preprocess data for evaluation
+        _, X_test, _, y_test = self.load_and_preprocess_data()
         
-        # Send weights to server
-        self.send_weights(model)
+        # Make predictions
+        y_pred = self.model.predict(X_test)
         
-        # Wait for server to aggregate
-        time.sleep(2)
-        
-        # Get global model
-        self.get_global_model() 
+        # Calculate accuracy
+        accuracy = np.mean(y_pred == y_test)
+        print(f"[CLIENT1] Model evaluation - Accuracy: {accuracy:.4f}", flush=True)
+        return accuracy
+
+def run_client(n_epochs=5):
+    print("[CLIENT1] Client 1 started!", flush=True)
+    client = Client()
+    # Train local model
+    metrics = client.train_model(n_epochs=n_epochs)
+    # Send model to server
+    client.send_model()
+    # Wait for global model (in a real system, this would be event-driven)
+    print("[CLIENT1] Waiting for global model...", flush=True)
+    # For demonstration, we'll simulate this by directly updating now
+    client.update_model()
+    # Evaluate the updated model
+    client.evaluate_model()
+    
+if __name__ == "__main__":
+    run_client() 

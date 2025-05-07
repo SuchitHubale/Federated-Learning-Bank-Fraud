@@ -1,204 +1,263 @@
 import streamlit as st
-import requests
-import time
 import pandas as pd
-import re
-import io
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import json
+import os
+import time
+from datetime import datetime
+from typing import Optional
 
-st.set_page_config(page_title="Federated Learning Dashboard", layout="wide")
+# Set page config
+st.set_page_config(
+    page_title="Federated Learning Dashboard",
+    page_icon="🏛️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Color palettes
-PALETTES = {
-    "Classic": {"bg": "#f5f7fa", "primary": "#1976d2", "secondary": "#43a047", "accent": "#fbc02d"},
-    "Ocean": {"bg": "#e0f7fa", "primary": "#0288d1", "secondary": "#26c6da", "accent": "#00bfae"},
-    "Sunset": {"bg": "#fff3e0", "primary": "#ff7043", "secondary": "#ffa726", "accent": "#ffd600"},
-    "Forest": {"bg": "#e8f5e9", "primary": "#388e3c", "secondary": "#8bc34a", "accent": "#cddc39"},
-    "Dark": {"bg": "#222", "primary": "#90caf9", "secondary": "#a5d6a7", "accent": "#fff59d"}
-}
-palette_name = st.selectbox("🌈 Select Color Palette", list(PALETTES.keys()), index=0)
-palette = PALETTES[palette_name]
+# Constants
+REFRESH_INTERVAL = 10  # Refresh every 10 seconds
+LOGS_DIR = 'logs'
+CLIENT1_METRICS_PATH = os.path.join(LOGS_DIR, 'client1_metrics.json')
+CLIENT2_METRICS_PATH = os.path.join(LOGS_DIR, 'client2_metrics.json')
+GLOBAL_METRICS_PATH = os.path.join(LOGS_DIR, 'global_metrics.json')
+AGGREGATION_LOG_PATH = os.path.join(LOGS_DIR, 'aggregation_log.json')
 
-# Apply palette
-st.markdown(f"""
-    <style>
-    .stApp {{ background-color: {palette['bg']} !important; }}
-    .css-1v0mbdj, .css-1d391kg, .css-1cpxqw2 {{ color: {palette['primary']} !important; }}
-    .css-1cpxqw2 {{ background-color: {palette['secondary']} !important; }}
-    </style>
-""", unsafe_allow_html=True)
+# Sidebar
+st.sidebar.title("🏛️ Federated Learning Dashboard")
+st.sidebar.subheader("Banking Fraud Detection")
 
-st.title("🧠 Federated Learning Server Dashboard")
+# Auto-refresh option
+auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
+if auto_refresh:
+    refresh_interval = st.sidebar.slider("Refresh interval (seconds)", 5, 60, REFRESH_INTERVAL)
 
-SERVER_URL = st.text_input("🌐 Server URL", "http://localhost:5000")
+# Helper functions
+def load_metrics(file_path: str) -> Optional[dict]:
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"Error loading metrics from {file_path}: {e}")
+    return None
 
-log_placeholder = st.empty()
-refresh_rate = st.slider("🔄 Refresh rate (seconds)", 1, 30, 5)
+def load_aggregation_log() -> list:
+    if os.path.exists(AGGREGATION_LOG_PATH):
+        try:
+            with open(AGGREGATION_LOG_PATH, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"Error loading aggregation log: {e}")
+    return []
 
-st.markdown("---")
-status_placeholder = st.empty()
+def safe_fmt(val):
+    return f"{val:.4f}" if isinstance(val, (float, int)) and val is not None else (val if val is not None else "N/A")
 
-# Fetch available clients for selection
-try:
-    metrics_resp = requests.get(f"{SERVER_URL}/metrics")
-    if metrics_resp.status_code == 200:
-        all_metrics = metrics_resp.json()
-        all_clients = list(all_metrics.keys())
+def status_card(title, status, value=None, color=None, icon=None, help_text=None):
+    color = color or ("#e0f7fa" if status == "waiting" else ("#e8f5e9" if status == "done" else "#fffde7"))
+    icon = icon or ("⏳" if status == "waiting" else ("✅" if status == "done" else "⚠️"))
+    st.markdown(f'''
+        <div style="background:{color};border-radius:12px;padding:1.2em 1em 1em 1em;margin-bottom:1em;box-shadow:0 2px 8px rgba(0,0,0,0.04);">
+            <span style="font-size:1.5em;">{icon}</span> <span style="font-size:1.2em;font-weight:600;">{title}</span><br>
+            <span style="font-size:2em;font-weight:bold;color:#1a7ee6;">{value if value is not None else ''}</span>
+            <div style="font-size:1em;color:#888;">{help_text if help_text else ''}</div>
+        </div>
+    ''', unsafe_allow_html=True)
+
+def metric_card(label, value, color=None):
+    color = color or ("#f7fafd" if value != "N/A" else "#fffde7")
+    st.markdown(f'''
+        <div style="background:{color};border-radius:8px;padding:0.7em 1em 0.7em 1em;display:inline-block;margin:0.2em 0.5em 0.2em 0;">
+            <span style="font-size:1.1em;font-weight:600;">{label}:</span> <span style="font-size:1.1em;">{value}</span>
+        </div>
+    ''', unsafe_allow_html=True)
+
+def format_classification_report(report, title):
+    if not report:
+        st.info(f"No {title} classification report available yet.")
+        return
+    try:
+        df = pd.DataFrame(report).transpose()
+        if "support" in df.columns:
+            df["support"] = df["support"].astype(int)
+        st.dataframe(df.style.format({
+            "precision": lambda x: f"{x:.4f}" if isinstance(x, (float, int)) else x,
+            "recall": lambda x: f"{x:.4f}" if isinstance(x, (float, int)) else x,
+            "f1-score": lambda x: f"{x:.4f}" if isinstance(x, (float, int)) else x
+        }), use_container_width=True)
+    except Exception as e:
+        st.warning(f"Could not display {title} classification report: {e}")
+
+def plot_metrics_history(client1_metrics, client2_metrics, global_metrics, metric_name):
+    fig, ax = plt.subplots(figsize=(7, 4))
+    if client1_metrics and "history" in client1_metrics and metric_name in client1_metrics["history"]:
+        epochs = range(1, len(client1_metrics["history"][metric_name]) + 1)
+        ax.plot(epochs, client1_metrics["history"][metric_name], marker='o', linestyle='-', label="🏦 Bank 1")
+    if client2_metrics and "history" in client2_metrics and metric_name in client2_metrics["history"]:
+        epochs = range(1, len(client2_metrics["history"][metric_name]) + 1)
+        ax.plot(epochs, client2_metrics["history"][metric_name], marker='s', linestyle='-', label="🏦 Bank 2")
+    if global_metrics and "metrics" in global_metrics and metric_name in global_metrics["metrics"]:
+        ax.axhline(y=global_metrics["metrics"][metric_name], color='r', linestyle='--', label="🏛️ Crime Branch (Global)")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(metric_name.capitalize())
+    ax.set_title(f"{metric_name.capitalize()} During Training")
+    ax.legend()
+    ax.grid(True)
+    return fig
+
+def progress_status(client1_metrics, client2_metrics, global_metrics):
+    steps = [
+        ("Bank 1 Training", client1_metrics is not None),
+        ("Bank 2 Training", client2_metrics is not None),
+        ("Model Aggregation", global_metrics is not None)
+    ]
+    done = sum(1 for _, ok in steps if ok)
+    st.progress(done / len(steps))
+    for label, ok in steps:
+        status_card(label, "done" if ok else "waiting", icon="✅" if ok else "⏳", help_text="Done" if ok else "Waiting...")
+
+# Main dashboard
+def main():
+    st.title("🏛️ Federated Learning for Banking Fraud Detection")
+    st.markdown("""
+        <style>
+        .section-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            margin-bottom: 0.5em;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Load metrics
+    client1_metrics = load_metrics(CLIENT1_METRICS_PATH)
+    client2_metrics = load_metrics(CLIENT2_METRICS_PATH)
+    global_metrics = load_metrics(GLOBAL_METRICS_PATH)
+    aggregation_log = load_aggregation_log()
+
+    # --- PROGRESS BAR ---
+    st.markdown('<div class="section-title">🚦 Progress Overview</div>', unsafe_allow_html=True)
+    progress_status(client1_metrics, client2_metrics, global_metrics)
+
+    # --- STATUS CARDS ---
+    st.markdown('<div class="section-title">🔎 Model Status</div>', unsafe_allow_html=True)
+    status_cols = st.columns(3)
+    with status_cols[0]:
+        if client1_metrics:
+            status_card("🏦 Bank 1", "done", value=safe_fmt(client1_metrics.get("final_accuracy", client1_metrics.get("metrics", {}).get("accuracy", None))), help_text="Model Trained")
+        else:
+            status_card("🏦 Bank 1", "waiting", help_text="Waiting for training data...")
+    with status_cols[1]:
+        if client2_metrics:
+            status_card("🏦 Bank 2", "done", value=safe_fmt(client2_metrics.get("final_accuracy", client2_metrics.get("metrics", {}).get("accuracy", None))), help_text="Model Trained")
+        else:
+            status_card("🏦 Bank 2", "waiting", help_text="Waiting for training data...")
+    with status_cols[2]:
+        if global_metrics:
+            status_card("🏛️ Crime Branch (Global)", "done", value=safe_fmt(global_metrics.get("metrics", {}).get("accuracy", global_metrics.get("final_accuracy", None))), help_text="Model Aggregated")
+        else:
+            status_card("🏛️ Crime Branch (Global)", "waiting", help_text="Waiting for aggregation...")
+
+    # --- METRICS ---
+    st.markdown('<div class="section-title">📊 Metrics Overview</div>', unsafe_allow_html=True)
+    metric_options = ["accuracy", "precision", "recall", "f1", "loss"]
+    selected_metric = st.selectbox("Select Metric to Plot", metric_options, index=0, key="metric_select")
+    if client1_metrics or client2_metrics or global_metrics:
+        fig = plot_metrics_history(client1_metrics, client2_metrics, global_metrics, selected_metric)
+        st.pyplot(fig)
     else:
-        all_clients = []
-except Exception:
-    all_clients = []
-
-selected_clients = st.multiselect("👤 Select Clients to Display", all_clients, default=all_clients[:2])
-
-# Main metrics area
-client_cols = st.columns(2)
-agg_placeholder = st.empty()
-
-metrics_placeholder = st.empty()
-
-# Custom prediction form
-st.markdown("---")
-st.header("🔍 Custom Fraud Prediction (Server Model)")
-with st.form("predict_form"):
-    amount = st.number_input("💰 Amount", min_value=0.0, value=1000.0)
-    type_option = st.selectbox("📝 Type", ["PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"])
-    oldbalanceOrg = st.number_input("🏦 Old Balance Origin", min_value=0.0, value=0.0)
-    newbalanceOrig = st.number_input("🏦 New Balance Origin", min_value=0.0, value=0.0)
-    oldbalanceDest = st.number_input("🏦 Old Balance Dest", min_value=0.0, value=0.0)
-    newbalanceDest = st.number_input("🏦 New Balance Dest", min_value=0.0, value=0.0)
-    submit = st.form_submit_button("🚦 Predict Fraud")
-if submit:
-    predict_payload = {
-        "amount": amount,
-        "type": type_option,
-        "oldbalanceOrg": oldbalanceOrg,
-        "newbalanceOrig": newbalanceOrig,
-        "oldbalanceDest": oldbalanceDest,
-        "newbalanceDest": newbalanceDest
+        st.info("Waiting for training data...")
+    # Final metrics comparison
+    st.markdown("**Final Metrics Comparison**")
+    metrics_data = {
+        "Model": ["Bank 1", "Bank 2", "Crime Branch (Global)"],
+        "Accuracy": [
+            safe_fmt(client1_metrics.get("final_accuracy", client1_metrics.get("metrics", {}).get("accuracy", None))) if client1_metrics else "N/A",
+            safe_fmt(client2_metrics.get("final_accuracy", client2_metrics.get("metrics", {}).get("accuracy", None))) if client2_metrics else "N/A",
+            safe_fmt(global_metrics.get("metrics", {}).get("accuracy", global_metrics.get("final_accuracy", None))) if global_metrics else "N/A"
+        ],
+        "Precision": [
+            safe_fmt(client1_metrics.get("final_precision", client1_metrics.get("metrics", {}).get("precision", None))) if client1_metrics else "N/A",
+            safe_fmt(client2_metrics.get("final_precision", client2_metrics.get("metrics", {}).get("precision", None))) if client2_metrics else "N/A",
+            safe_fmt(global_metrics.get("metrics", {}).get("precision", global_metrics.get("final_precision", None))) if global_metrics else "N/A"
+        ],
+        "Recall": [
+            safe_fmt(client1_metrics.get("final_recall", client1_metrics.get("metrics", {}).get("recall", None))) if client1_metrics else "N/A",
+            safe_fmt(client2_metrics.get("final_recall", client2_metrics.get("metrics", {}).get("recall", None))) if client2_metrics else "N/A",
+            safe_fmt(global_metrics.get("metrics", {}).get("recall", global_metrics.get("final_recall", None))) if global_metrics else "N/A"
+        ],
+        "F1-Score": [
+            safe_fmt(client1_metrics.get("final_f1", client1_metrics.get("metrics", {}).get("f1", None))) if client1_metrics else "N/A",
+            safe_fmt(client2_metrics.get("final_f1", client2_metrics.get("metrics", {}).get("f1", None))) if client2_metrics else "N/A",
+            safe_fmt(global_metrics.get("metrics", {}).get("f1", global_metrics.get("final_f1", None))) if global_metrics else "N/A"
+        ]
     }
-    try:
-        response = requests.post(f"{SERVER_URL}/predict", json=predict_payload)
-        if response.status_code == 200:
-            result = response.json()
-            st.success(f"Fraud Probability: {result['fraud_probability']:.4f}")
-            st.info(f"Fraud Prediction: {'🛑 FRAUD' if result['fraud_prediction'] else '✅ NOT FRAUD'}")
-        else:
-            st.error(f"Prediction failed: {response.json().get('error', 'Unknown error')}")
-    except Exception as e:
-        st.error(f"Prediction error: {e}")
+    df_metrics = pd.DataFrame(metrics_data)
+    st.table(df_metrics)
 
-st.markdown("---")
-st.header("📜 Server Logs & Client Updates")
-
-# For advanced analytics
-summary_stats = {}
-latest_metrics = []
-
-while True:
-    # Status
-    try:
-        response = requests.get(f"{SERVER_URL}/status")
-        if response.status_code == 200:
-            status = response.json()
-            status_placeholder.info(f"🕒 **Current Round:** `{status['current_round']}` | 🏁 **Last Aggregated Round:** `{status['last_aggregated_round']}` | 👥 **Clients Waiting:** `{status['clients_waiting']}`")
-        else:
-            status_placeholder.error("Failed to fetch status from server.")
-    except Exception as e:
-        status_placeholder.error(f"Error: {e}")
-    # Metrics
-    try:
-        response = requests.get(f"{SERVER_URL}/metrics")
-        if response.status_code == 200:
-            metrics = response.json()
-            if metrics:
-                st.subheader("📊 Client Training Metrics (Per Epoch)")
-                for idx, client_id in enumerate(selected_clients[:2]):
-                    if client_id in metrics:
-                        with client_cols[idx]:
-                            df = pd.DataFrame(metrics[client_id])
-                            st.markdown(f"### 🖥️ Client: `{client_id}`")
-                            st.line_chart(df.set_index('epoch')[['val_accuracy', 'loss']])
-                            st.line_chart(df.set_index('epoch')[['precision', 'recall', 'f1']])
-                            st.success(f"Latest Accuracy: {df['val_accuracy'].iloc[-1]:.4f}")
-                            st.info(f"Latest F1: {df['f1'].iloc[-1]:.4f}")
-                            # Advanced analytics: summary stats
-                            stats = df[['val_accuracy', 'loss', 'precision', 'recall', 'f1']].describe().T
-                            summary_stats[client_id] = stats
-                            latest_metrics.append({
-                                'Client': client_id,
-                                'Accuracy': df['val_accuracy'].iloc[-1],
-                                'F1': df['f1'].iloc[-1]
-                            })
-                # Show summary stats for all selected clients
-                if summary_stats:
-                    st.markdown("---")
-                    st.subheader("📈 Summary Statistics (Selected Clients)")
-                    for client_id, stats in summary_stats.items():
-                        st.markdown(f"#### `{client_id}`")
-                        st.dataframe(stats)
-                # Comparison bar chart for latest metrics
-                if latest_metrics:
-                    st.markdown("---")
-                    st.subheader("🏆 Latest Metrics Comparison")
-                    comp_df = pd.DataFrame(latest_metrics).set_index('Client')
-                    st.bar_chart(comp_df[['Accuracy', 'F1']])
+    # --- CLASSIFICATION REPORTS ---
+    st.markdown('<div class="section-title">📋 Classification Reports</div>', unsafe_allow_html=True)
+    with st.expander("Show Classification Reports", expanded=True):
+        rep_cols = st.columns(3)
+        with rep_cols[0]:
+            st.markdown("##### 🏦 Bank 1 Report")
+            if client1_metrics and ("classification_report" in client1_metrics or ("metrics" in client1_metrics and "classification_report" in client1_metrics["metrics"])):
+                report = client1_metrics.get("classification_report", client1_metrics.get("metrics", {}).get("classification_report", {}))
+                format_classification_report(report, "Bank 1")
             else:
-                metrics_placeholder.info("No metrics reported yet.")
-        else:
-            metrics_placeholder.error("Failed to fetch metrics from server.")
-    except Exception as e:
-        metrics_placeholder.error(f"Error: {e}")
-    # Aggregation animation block
-    try:
-        response = requests.get(f"{SERVER_URL}/status")
-        if response.status_code == 200:
-            status = response.json()
-            if status['clients_waiting'] == 0 and status['last_aggregated_round'] > 0:
-                with agg_placeholder:
-                    st.markdown(f"""
-                    <div style='background-color:{palette['accent']};padding:20px;border-radius:10px;text-align:center;'>
-                        <h2>🔄 Aggregation in Progress!</h2>
-                        <p style='color:{palette['primary']};font-size:20px;'>Averaging client models for round <b>{status['last_aggregated_round']+1}</b>...</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.spinner('Averaging...')
-                    st.balloons()
+                st.info("No Bank 1 classification report available yet. Train Bank 1 model to see this report.")
+        with rep_cols[1]:
+            st.markdown("##### 🏦 Bank 2 Report")
+            if client2_metrics and ("classification_report" in client2_metrics or ("metrics" in client2_metrics and "classification_report" in client2_metrics["metrics"])):
+                report = client2_metrics.get("classification_report", client2_metrics.get("metrics", {}).get("classification_report", {}))
+                format_classification_report(report, "Bank 2")
             else:
-                agg_placeholder.empty()
-    except Exception:
-        agg_placeholder.empty()
-    # Aggregation history (parse from logs)
-    try:
-        response = requests.get(f"{SERVER_URL}/logs")
-        if response.status_code == 200:
-            logs = response.json().get('logs', '')
-            log_placeholder.code(logs, language='text')
-            # Parse aggregation events
-            agg_events = []
-            for line in logs.splitlines():
-                m = re.search(r'Aggregated weights from clients: (.*?) \(Round (\d+)\)', line)
-                if m:
-                    clients = m.group(1)
-                    round_num = int(m.group(2))
-                    time_match = re.match(r'^(.*?) - ', line)
-                    agg_time = time_match.group(1) if time_match else ''
-                    agg_events.append({"Round": round_num, "Clients": clients, "Time": agg_time})
-            if agg_events:
-                st.markdown("---")
-                st.subheader("🧾 Aggregation History")
-                agg_df = pd.DataFrame(agg_events).sort_values("Round", ascending=False)
-                st.dataframe(agg_df)
-                # Export as CSV
-                csv = agg_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="⬇️ Export Aggregation History as CSV",
-                    data=csv,
-                    file_name='aggregation_history.csv',
-                    mime='text/csv',
-                    key=f'agg_history_csv_{time.time()}'
-                )
+                st.info("No Bank 2 classification report available yet. Train Bank 2 model to see this report.")
+        with rep_cols[2]:
+            st.markdown("##### 🏛️ Crime Branch Report")
+            if global_metrics and ("classification_report" in global_metrics or ("metrics" in global_metrics and "classification_report" in global_metrics["metrics"])):
+                report = global_metrics.get("classification_report", global_metrics.get("metrics", {}).get("classification_report", {}))
+                format_classification_report(report, "Crime Branch")
+            else:
+                st.info("No Crime Branch classification report available yet. Wait for aggregation.")
+
+    # --- AGGREGATION LOGS ---
+    st.markdown('<div class="section-title">🛠️ Aggregation Logs</div>', unsafe_allow_html=True)
+    if aggregation_log:
+        log_data = []
+        for entry in aggregation_log:
+            timestamp = entry.get("timestamp", "")
+            if isinstance(timestamp, str) and "numberLong" in timestamp:
+                try:
+                    timestamp_dict = json.loads(timestamp)
+                    timestamp_ms = int(timestamp_dict["$date"]["$numberLong"])
+                    timestamp = datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+            log_data.append({
+                "Round": entry.get("round", ""),
+                "Client Models": ", ".join(entry.get("client_models", [])) if entry.get("client_models") else "",
+                "Weights": ", ".join([f"{w:.2f}" for w in entry.get("weights", [])]) if entry.get("weights") else "",
+                "Error": entry.get("error", ""),
+                "Timestamp": timestamp
+            })
+        df_log = pd.DataFrame(log_data)
+        st.dataframe(df_log, use_container_width=True)
+    else:
+        st.info("No aggregation logs available yet. Aggregation will appear here after both clients upload their models.")
+
+    # Auto-refresh
+    if auto_refresh:
+        time.sleep(refresh_interval)
+        if hasattr(st, 'rerun'):
+            st.rerun()
+        elif hasattr(st, 'experimental_rerun'):
+            st.experimental_rerun()
         else:
-            log_placeholder.error("Failed to fetch logs from server.")
-    except Exception as e:
-        log_placeholder.error(f"Error: {e}")
-    time.sleep(refresh_rate) 
+            st.warning("Streamlit rerun is not available in your version. Please upgrade Streamlit.")
+
+if __name__ == "__main__":
+    main() 
